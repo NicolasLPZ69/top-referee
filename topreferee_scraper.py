@@ -1,167 +1,94 @@
 """
-Top Referee — Scraper Ligue 1 (saison en cours)
-Source : SofaScore API (publique non-officielle)
+Top Referee — Scraper FBref (Ligue 1, saison en cours)
+Source : fbref.com — page officielle des arbitres
 
-Sortie : ligue1_arbitrage_<saison>.csv
-Une ligne par match avec les KPIs arbitrage de base.
+Sortie : ligue1_arbitres_fbref.csv
+Une ligne par arbitre avec ses stats agrégées sur la saison.
 """
 
 import urllib.request
 import urllib.error
-import json
 import csv
-import time
 import sys
-from datetime import datetime
+import re
+from io import StringIO
 
-BASE = "https://api.sofascore.com/api/v1"
+URL = "https://fbref.com/fr/comps/13/officials/Statistiques-Ligue-1"
+
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) Version/16.0 Safari/605.1.15",
-    "Accept": "application/json",
-    "Accept-Language": "fr-FR,fr;q=0.9",
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
 }
-LIGUE1_TOURNAMENT_ID = 34
-RATE_LIMIT_SECONDS = 1.5  # politesse — ne pas baisser
 
-# ---------------------------------------------------------------------------
 
-def get(url):
-    """Appel HTTP simple, JSON parsé, rate limit intégré."""
+def fetch(url):
     req = urllib.request.Request(url, headers=HEADERS)
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        print(f"  ! HTTP {e.code} sur {url}", file=sys.stderr)
-        raise
-    except urllib.error.URLError as e:
-        print(f"  ! Réseau : {e.reason}", file=sys.stderr)
-        raise
-    time.sleep(RATE_LIMIT_SECONDS)
-    return data
-
-
-def get_current_season():
-    """Retourne (season_id, label) de la saison Ligue 1 en cours."""
-    data = get(f"{BASE}/unique-tournament/{LIGUE1_TOURNAMENT_ID}/seasons")
-    season = data["seasons"][0]  # la plus récente est en premier
-    return season["id"], season["year"]
-
-
-def get_round_events(season_id, round_num):
-    """Liste des matchs d'une journée."""
-    url = f"{BASE}/unique-tournament/{LIGUE1_TOURNAMENT_ID}/season/{season_id}/events/round/{round_num}"
-    return get(url).get("events", [])
-
-
-def get_match_details(event_id):
-    """Récupère event + incidents + statistiques d'un match."""
-    event = get(f"{BASE}/event/{event_id}").get("event", {})
-    incidents = get(f"{BASE}/event/{event_id}/incidents").get("incidents", [])
-    try:
-        stats = get(f"{BASE}/event/{event_id}/statistics").get("statistics", [])
-    except urllib.error.HTTPError:
-        stats = []
-    return event, incidents, stats
-
-
-def extract_fouls(stats):
-    """Extrait les fautes domicile/extérieur depuis le bloc stats."""
-    home, away = None, None
-    for period in stats:
-        if period.get("period") == "ALL":
-            for group in period.get("groups", []):
-                for item in group.get("statisticsItems", []):
-                    if item.get("name") in ("Fouls", "Fautes"):
-                        home = item.get("home")
-                        away = item.get("away")
-    return home, away
-
-
-def parse_match(event, incidents, stats):
-    """Transforme les données brutes en une ligne propre."""
-    referee = event.get("referee") or {}
-    home_team = event.get("homeTeam", {}).get("name")
-    away_team = event.get("awayTeam", {}).get("name")
-
-    yellow = sum(
-        1 for i in incidents
-        if i.get("incidentType") == "card" and i.get("incidentClass") in ("yellow", "yellowRed")
-    )
-    red = sum(
-        1 for i in incidents
-        if i.get("incidentType") == "card" and i.get("incidentClass") in ("red", "yellowRed")
-    )
-    var_decisions = [i for i in incidents if i.get("incidentType") == "varDecision"]
-    var_count = len(var_decisions)
-    var_overturns = sum(
-        1 for v in var_decisions
-        if v.get("decision") in ("overturned", "goalAwarded", "penaltyAwarded", "redCardGiven", "noPenalty", "goalNotAwarded")
-    )
-
-    fouls_home, fouls_away = extract_fouls(stats)
-
-    return {
-        "match_id": event.get("id"),
-        "date": datetime.fromtimestamp(event["startTimestamp"]).date().isoformat() if event.get("startTimestamp") else None,
-        "round": event.get("roundInfo", {}).get("round"),
-        "home_team": home_team,
-        "away_team": away_team,
-        "home_score": event.get("homeScore", {}).get("current"),
-        "away_score": event.get("awayScore", {}).get("current"),
-        "referee_id": referee.get("id"),
-        "referee_name": referee.get("name"),
-        "referee_country": (referee.get("country") or {}).get("name"),
-        "yellow_cards": yellow,
-        "red_cards": red,
-        "var_decisions_total": var_count,
-        "var_decisions_overturned": var_overturns,
-        "fouls_home": fouls_home,
-        "fouls_away": fouls_away,
-    }
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read().decode("utf-8")
 
 
 def main():
-    season_id, year = get_current_season()
-    print(f"Saison Ligue 1 {year} (id {season_id})")
+    print(f"Fetching {URL}")
+    try:
+        html = fetch(URL)
+    except urllib.error.HTTPError as e:
+        print(f"  ! HTTP {e.code} : {e.reason}", file=sys.stderr)
+        sys.exit(1)
+    print(f"  {len(html):,} bytes")
 
-    rows = []
-    for round_num in range(1, 39):  # 38 journées max
-        try:
-            events = get_round_events(season_id, round_num)
-        except urllib.error.HTTPError:
+    # FBref encapsule certaines tables dans des commentaires HTML
+    # pour limiter le scraping naïf. On les "déballe".
+    html = html.replace("<!--", "").replace("-->", "")
+
+    import pandas as pd
+
+    tables = pd.read_html(StringIO(html))
+    print(f"  {len(tables)} tables détectées")
+
+    # Localiser la table arbitres (présence d'une colonne "Arbitre")
+    target = None
+    for i, t in enumerate(tables):
+        cols = []
+        for c in t.columns:
+            if isinstance(c, tuple):
+                cols.extend(str(x).lower() for x in c)
+            else:
+                cols.append(str(c).lower())
+        if any("arbitre" in c for c in cols):
+            target = t
+            print(f"  → table arbitres trouvée (index {i}, {len(t)} lignes)")
             break
-        if not events:
-            break
 
-        finished = [e for e in events if e.get("status", {}).get("type") == "finished"]
-        if not finished:
-            print(f"  Journée {round_num} : pas encore jouée, on s'arrête.")
-            break
+    if target is None:
+        print("  ! Aucune table d'arbitres détectée", file=sys.stderr)
+        for i, t in enumerate(tables[:5]):
+            sample = list(t.columns)[:6]
+            print(f"    table {i} : {sample}", file=sys.stderr)
+        sys.exit(1)
 
-        print(f"  Journée {round_num} : {len(finished)} match(s) terminé(s)")
-        for event in finished:
-            try:
-                e, inc, st = get_match_details(event["id"])
-                row = parse_match(e, inc, st)
-                rows.append(row)
-                print(f"    ✓ {row['home_team']} {row['home_score']}-{row['away_score']} {row['away_team']} "
-                      f"(arbitre : {row['referee_name']})")
-            except Exception as ex:
-                print(f"    ✗ {event.get('id')} : {ex}")
+    # Aplatir les en-têtes multi-niveaux
+    if isinstance(target.columns, pd.MultiIndex):
+        new_cols = []
+        for c in target.columns:
+            label = c[-1] if c[-1] and not c[-1].startswith("Unnamed") else c[-2]
+            new_cols.append(label)
+        target.columns = new_cols
 
-    if not rows:
-        print("Aucun match récupéré.")
-        return
+    # Retirer les lignes vides / résumés
+    target = target.dropna(how="all")
+    if "Arbitre" in target.columns:
+        target = target[target["Arbitre"].notna()]
+        target = target[target["Arbitre"] != "Arbitre"]  # virer les ré-headers
 
-    out = f"ligue1_arbitrage_{year.replace('/', '_')}.csv"
-    with open(out, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=rows[0].keys())
-        writer.writeheader()
-        writer.writerows(rows)
-
-    print(f"\n→ {len(rows)} matchs exportés dans {out}")
+    out = "ligue1_arbitres_fbref.csv"
+    target.to_csv(out, index=False, encoding="utf-8")
+    print(f"\n→ {len(target)} arbitres exportés dans {out}")
+    print(f"  Colonnes : {list(target.columns)}")
 
 
 if __name__ == "__main__":
