@@ -21,6 +21,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Install dependencies
+        run: pip install pandas lxml html5lib
+
       - name: Run scraper
         run: python topreferee_scraper.py
 
