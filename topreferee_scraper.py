@@ -1,5 +1,6 @@
 """
-Top Referee — Scraper SofaScore via RapidAPI (apidojo)
+Top Referee — Scraper SofaScore via RapidAPI (apidojo) — V2
+Endpoints validés sur le plan BASIC.
 """
 
 import os
@@ -44,7 +45,7 @@ def get_current_season():
     data = call(f"/tournaments/get-seasons?tournamentId={LIGUE1_TOURNAMENT_ID}")
     seasons = data.get("seasons", []) or []
     if not seasons:
-        raise RuntimeError("Aucune saison retournee par l'API")
+        raise RuntimeError("Aucune saison retournee")
     s = seasons[0]
     return s["id"], s.get("year", "?")
 
@@ -59,26 +60,25 @@ def get_last_round(season_id):
     return rounds[-1].get("round", 1)
 
 
-def get_round_events(season_id, round_num):
+def get_recent_matches(season_id, page=0):
+    """Liste paginee des matchs recents (finis) pour la saison."""
     data = call(
-        f"/tournaments/get-events?tournamentId={LIGUE1_TOURNAMENT_ID}"
-        f"&seasonId={season_id}&round={round_num}"
+        f"/tournaments/get-last-matches?tournamentId={LIGUE1_TOURNAMENT_ID}"
+        f"&seasonId={season_id}&pageIndex={page}"
     )
-    return data.get("events", []) or []
+    return data.get("events") or data.get("matches") or []
 
 
-def get_match_data(match_id):
-    detail = call(f"/matches/get-detail?matchId={match_id}")
-    incidents = call(f"/matches/get-incidents?matchId={match_id}")
-    try:
-        stats = call(f"/matches/get-statistics?matchId={match_id}")
-    except urllib.error.HTTPError:
-        stats = {"statistics": []}
-    return detail, incidents, stats
+def get_match_detail(match_id):
+    return call(f"/matches/detail?matchId={match_id}")
 
 
-def parse(detail, incidents_raw, stats_raw):
-    event = detail.get("event") or detail.get("match") or {}
+def get_match_incidents(match_id):
+    return call(f"/matches/get-incidents?matchId={match_id}")
+
+
+def parse(detail, incidents_raw):
+    event = detail.get("event") or detail.get("match") or detail or {}
     referee = event.get("referee") or {}
     home = (event.get("homeTeam") or {}).get("name")
     away = (event.get("awayTeam") or {}).get("name")
@@ -96,17 +96,9 @@ def parse(detail, incidents_raw, stats_raw):
     )
     var_decisions = [i for i in incidents if i.get("incidentType") == "varDecision"]
 
-    fouls_home = fouls_away = None
-    for period in (stats_raw.get("statistics") or []):
-        if period.get("period") == "ALL":
-            for group in period.get("groups", []):
-                for item in group.get("statisticsItems", []):
-                    if item.get("name") in ("Fouls", "Fautes"):
-                        fouls_home = item.get("home")
-                        fouls_away = item.get("away")
-
     return {
         "match_id": event.get("id"),
+        "round": (event.get("roundInfo") or {}).get("round"),
         "home_team": home,
         "away_team": away,
         "score_home": (event.get("homeScore") or {}).get("current"),
@@ -117,8 +109,6 @@ def parse(detail, incidents_raw, stats_raw):
         "yellow_cards": yellow,
         "red_cards": red,
         "var_decisions": len(var_decisions),
-        "fouls_home": fouls_home,
-        "fouls_away": fouls_away,
     }
 
 
@@ -126,25 +116,34 @@ def main():
     season_id, year = get_current_season()
     print(f"Saison Ligue 1 {year} (id={season_id})")
 
-    round_num = get_last_round(season_id)
-    print(f"Derniere journee disponible : {round_num}")
+    last_round = get_last_round(season_id)
+    print(f"Derniere journee disponible : {last_round}")
 
-    events = get_round_events(season_id, round_num)
-    print(f"  {len(events)} matchs trouves")
+    recent = get_recent_matches(season_id, page=0)
+    print(f"  {len(recent)} matchs recents recuperes")
+
+    events_in_round = [
+        e for e in recent
+        if (e.get("roundInfo") or {}).get("round") == last_round
+    ]
+    if not events_in_round:
+        events_in_round = recent[:10]
+    print(f"  {len(events_in_round)} matchs cibles pour la journee {last_round}")
 
     rows = []
-    for ev in events:
-        status_type = (ev.get("status") or {}).get("type")
-        if status_type != "finished":
+    for ev in events_in_round:
+        status = (ev.get("status") or {}).get("type")
+        if status != "finished":
             continue
         match_id = ev.get("id")
         try:
-            d, i, s = get_match_data(match_id)
-            row = parse(d, i, s)
+            d = get_match_detail(match_id)
+            i = get_match_incidents(match_id)
+            row = parse(d, i)
             rows.append(row)
             print(
                 f"  OK {row['home_team']} {row['score_home']}-{row['score_away']} "
-                f"{row['away_team']} | arbitre : {row['referee_name']} "
+                f"{row['away_team']} | arbitre: {row['referee_name']} "
                 f"| J:{row['yellow_cards']} R:{row['red_cards']} VAR:{row['var_decisions']}"
             )
         except Exception as e:
